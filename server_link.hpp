@@ -40,6 +40,7 @@ private:
 		bool getdata;//为true时，代表获取的是长度，为false时，代表获取的是消息
 		int sendflag;
 		std::shared_ptr<char[]> buffer;//缓存区指针
+		SOCKET client_socket;
 
 		CustomOverlapped() : getdata(false), sendflag(0) {
 			ZeroMemory(&overlapped, sizeof(OVERLAPPED));
@@ -161,7 +162,7 @@ public:
 			return -1;
 		}
 		else {
-			std::cerr << "服务器正在监听端口" << PORT << std::endl;
+			std::cerr << "服务器socket：" << serversocket << "正在监听端口" << PORT << std::endl;
 		}
 		return listen_result;
 	}
@@ -195,15 +196,17 @@ public:
 				continue;
 			}
 
-			SOCKET client_socket = (SOCKET)completionKey;
 			CustomOverlapped* context_ = CONTAINING_RECORD(overlapped, CustomOverlapped, overlapped);
 			std::shared_ptr<CustomOverlapped> context(context_);
-
-			std::cout << context_->sendflag << "---" << context_->getdata << std::endl;//输出了0---0
-
+			//SOCKET client_socket = (SOCKET)completionKey;
+			SOCKET client_socket = context->client_socket;
 			//客户端断开连接或 IO 错误
 			if (!success || bytesTransferred == 0) {
 				DWORD error = GetLastError();
+				if (client_socket == serversocket) {
+					std::cerr << "Warning: Attempted to close server socket " << client_socket << std::endl;
+					continue; // 跳过关闭服务器 socket
+				}
 				if (error == ERROR_SUCCESS) {
 					// 忽略非致命错误
 					std::cerr << "Client " << client_socket << " connection closed gracefully." << std::endl;
@@ -222,9 +225,9 @@ public:
 					closesocket(client_socket);
 				}
 				// 释放资源
-				delete overlapped;
 				continue;
 			}
+
 
 			if (context->sendflag == 1) {
 				send_result(overlapped);
@@ -276,20 +279,15 @@ public:
 		CustomOverlapped* context_ = CONTAINING_RECORD(overlapped, CustomOverlapped, overlapped);
 		std::shared_ptr<CustomOverlapped> context(context_);
 
-		HANDLE hResult = CreateIoCompletionPort((HANDLE)clientSocket, g_hCompletionPort, (ULONG_PTR)clientSocket, 0);
-		if (hResult == NULL) {
-			std::cerr << "CreateIoCompletionPort failed: " << GetLastError() << std::endl;
-			closesocket(clientSocket);
-			delete overlapped;
-			return;
-		}
-
 		{
 			std::lock_guard<std::mutex> lock(result_m);
 			links.push_back(clientSocket);
 		}
 		//启动首次接收
 		recv_(clientSocket, 4, true);
+
+		// 发起新的 AcceptEx
+		accept_(serversocket, g_hCompletionPort);
 
 		delete overlapped;
 	}
@@ -308,6 +306,14 @@ public:
 		context->buffer = std::shared_ptr<char[]>(new char[sizeof(struct sockaddr_in) * 2 + 32]);
 		context->getdata = false; // 标记为 AcceptEx 操作
 		context->sendflag = 0;    // accept标志
+		context->client_socket = acceptSocket;
+
+		HANDLE hResult = CreateIoCompletionPort((HANDLE)acceptSocket, completionPort, (ULONG_PTR)acceptSocket, 0);
+		if (hResult == NULL) {
+			std::cerr << "CreateIoCompletionPort failed for acceptSocket: " << GetLastError() << std::endl;
+			closesocket(acceptSocket);
+			return;
+		}
 
 		// 获取 AcceptEx 函数指针
 		GUID guidAcceptEx = WSAID_ACCEPTEX;
