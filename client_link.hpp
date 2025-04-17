@@ -4,7 +4,6 @@
 #include <string>
 #include <WinSock2.h>
 #include <ws2tcpip.h>
-#include <vector>
 
 #pragma comment(lib,"Ws2_32.lib")
 
@@ -14,14 +13,32 @@ private:
 
 	u_short PORT;
 
-	size_t BUFFER_SIZE;
-
-	wchar_t* ip_;
+	const wchar_t* ip_;
 
 	SOCKET clientsocket;
 
 	struct sockaddr_in server_addr;
 public:
+	//-------------------------------------------属性赋值 开始--------------------------------------------------
+
+	void setPort(const u_short& PORT_) {
+		PORT = PORT_;
+	}
+
+	void setIP(const wchar_t* ip_) {
+		this->ip_ = ip_;
+	}
+
+	//可以一次调用此函数
+	void init_clientlink(bool isprint = false) {
+		init_WSA(isprint);
+		init_socket(isprint);
+		init_serverinfo();
+		connect_server();
+	}
+
+	//-------------------------------------------属性赋值 结束--------------------------------------------------
+
 	//-------------------------------------------初始化 开始--------------------------------------------------
 	int init_WSA(bool isprint = false) {
 		if (WSAStartup(MAKEWORD(2, 2), &wsadata) != 0) {
@@ -39,7 +56,7 @@ public:
 	}
 
 	int init_socket(bool isprint = false) {
-		clientsocket = socket(AF_INET, SOCK_STREAM, 0);
+		clientsocket = WSASocket(AF_INET, SOCK_STREAM, 0, NULL,0, WSA_FLAG_OVERLAPPED);
 		if (clientsocket == INVALID_SOCKET) {
 			if (isprint) {
 				std::cerr << "socket创建失败" << std::endl;
@@ -54,7 +71,7 @@ public:
 		}
 	}
 
-	int init_serverinfo() {
+	void init_serverinfo() {
 		server_addr.sin_port = htons(PORT);
 		server_addr.sin_family = AF_INET;
 
@@ -116,6 +133,7 @@ public:
 			/*
 				这里的第二个参数，是一个比较难理解的写法。让我来解释为什么这样写
 				首先，我们这里第二个参数需要的是一个数组指针。
+				这就是为什么有时候可以放数组名进去，有时候又可以放指针进去
 				一般来说我们把buffer放进去，对于数组来说，实际上放进去了一个指向数组第一个位置的指针
 				所以这里可以 +数字 得到后面的位置指针
 				然后从后面的位置开始继续写
@@ -163,5 +181,15 @@ public:
 		buffer = nullptr;
 
 		return result;
+	}
+
+	//停止套接字的读写阻塞
+	void shutdown_() {
+		shutdown(clientsocket, SD_BOTH);
+	}
+	//手动关闭清理资源
+	void close_() {
+		closesocket(clientsocket);
+		WSACleanup();
 	}
 };
