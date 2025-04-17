@@ -39,12 +39,19 @@ private:
 		OVERLAPPED overlapped;//嵌入overlapped
 		bool getdata;//为true时，代表获取的是长度，为false时，代表获取的是消息
 		int sendflag;
-		std::shared_ptr<char[]> buffer;//缓存区指针
 		SOCKET client_socket;
+		size_t buffer_len;//缓存区长度
+		char* buffer;//缓存区指针
 
-		CustomOverlapped() : getdata(false), sendflag(0) {
+
+
+		CustomOverlapped() : getdata(false), sendflag(-1), buffer_len(0), client_socket(INVALID_SOCKET), buffer(nullptr) {
 			ZeroMemory(&overlapped, sizeof(OVERLAPPED));
 		}
+		~CustomOverlapped() {
+			delete[] buffer;
+		}
+
 	};
 public:
 	//---------------------------------------基本函数 开始---------------------------------------
@@ -196,35 +203,47 @@ public:
 				continue;
 			}
 
-			CustomOverlapped* context_ = CONTAINING_RECORD(overlapped, CustomOverlapped, overlapped);
-			std::shared_ptr<CustomOverlapped> context(context_);
-			//SOCKET client_socket = (SOCKET)completionKey;
+			CustomOverlapped* context = CONTAINING_RECORD(overlapped, CustomOverlapped, overlapped);
+
+			//SOCKET client_socket = (SOCKET)completionKey;//这个方法不行
 			SOCKET client_socket = context->client_socket;
-			//客户端断开连接或 IO 错误
+			std::cout << "context->sendflag:" << context->sendflag << "--client_socket:" << context->client_socket << "--sendflag：" << context->sendflag << std::endl;
+
+			// 检查 client_socket 是否有效
+			if (client_socket == INVALID_SOCKET) {
+				std::cerr << "Invalid client socket in completion" << std::endl;
+				delete context;
+				continue;
+			}
+			// 对于 AcceptEx，bytesTransferred == 0 是正常情况
+			if (context->sendflag == 0) {
+				if (!success) {
+					std::cerr << "AcceptEx failed with error: " << GetLastError() << std::endl;
+					delete context;
+					closesocket(client_socket);
+					continue;
+				}
+				accept_result(client_socket, overlapped);
+				continue;
+			}
+
 			if (!success || bytesTransferred == 0) {
 				DWORD error = GetLastError();
 				if (client_socket == serversocket) {
-					std::cerr << "Warning: Attempted to close server socket " << client_socket << std::endl;
-					continue; // 跳过关闭服务器 socket
+					std::cerr << "Warning: Server socket " << client_socket << " received completion, ignoring." << std::endl;
+					delete context;
+					continue;
 				}
 				if (error == ERROR_SUCCESS) {
-					// 忽略非致命错误
 					std::cerr << "Client " << client_socket << " connection closed gracefully." << std::endl;
 				}
 				else {
 					std::cerr << "Client " << client_socket << " disconnected or error: " << error << std::endl;
-					// 从 links 中移除 client_socket
-					{
-						std::lock_guard<std::mutex> lock(result_m);
-						links.erase(
-							std::remove(links.begin(), links.end(), client_socket),
-							links.end()
-						);
-					}
-					// 关闭套接字
-					closesocket(client_socket);
+					std::lock_guard<std::mutex> lock(result_m);
+					links.erase(std::remove(links.begin(), links.end(), client_socket), links.end());
 				}
-				// 释放资源
+				delete context;
+				closesocket(client_socket);
 				continue;
 			}
 
@@ -243,53 +262,50 @@ public:
 
 
 	void send_result(LPOVERLAPPED overlapped) {
-		CustomOverlapped* context_ = CONTAINING_RECORD(overlapped, CustomOverlapped, overlapped);
-		std::shared_ptr<CustomOverlapped> context(context_);
-
+		CustomOverlapped* context = CONTAINING_RECORD(overlapped, CustomOverlapped, overlapped);
+		delete context;
 		std::cout << "Send completed" << std::endl;
 
-		// 清理资源
-		delete overlapped;
 	}
 
 	void recv_result(SOCKET clientSocket, DWORD bytesTransferred, LPOVERLAPPED overlapped) {
-		CustomOverlapped* context_ = CONTAINING_RECORD(overlapped, CustomOverlapped, overlapped);
-		std::shared_ptr<CustomOverlapped> context(context_);
+		CustomOverlapped* context = CONTAINING_RECORD(overlapped, CustomOverlapped, overlapped);
 		if (context->getdata) {
 			//将得到的结果转化为数字
-			uint32_t message_length = ntohl(*reinterpret_cast<uint32_t*>(context->buffer.get()));
-			//清理资源
-			delete overlapped;
+			uint32_t message_length = ntohl(*reinterpret_cast<uint32_t*>(context->buffer));
 
+			std::cout << "接收到的内容：消息长度：" << message_length << std::endl;
+			//清理资源
+			delete context;
 			recv_(clientSocket, message_length, false);
 		}
 		else {
+			std::string message(context->buffer, bytesTransferred);
 			{
 				std::lock_guard<std::mutex> l_(result_m);
 				result_client.push_back(clientSocket);
-				result_print.emplace_back(std::string(context->buffer.get()));
-			}
-			delete overlapped;
+				result_print.emplace_back(message);
 
+				std::cout << "接收到的内容：消息内容：" << message << std::endl;
+			}
+			delete context;
 			recv_(clientSocket, 4, true);
 		}
 	}
 
 	void accept_result(SOCKET clientSocket, LPOVERLAPPED overlapped) {
-		CustomOverlapped* context_ = CONTAINING_RECORD(overlapped, CustomOverlapped, overlapped);
-		std::shared_ptr<CustomOverlapped> context(context_);
-
+		CustomOverlapped* context = CONTAINING_RECORD(overlapped, CustomOverlapped, overlapped);
 		{
 			std::lock_guard<std::mutex> lock(result_m);
 			links.push_back(clientSocket);
 		}
+		delete context;
 		//启动首次接收
 		recv_(clientSocket, 4, true);
 
 		// 发起新的 AcceptEx
 		accept_(serversocket, g_hCompletionPort);
 
-		delete overlapped;
 	}
 
 	//IOCP管理的accept
@@ -302,8 +318,9 @@ public:
 		}
 
 		// 分配上下文和缓冲区
-		std::shared_ptr<CustomOverlapped> context = std::make_shared<CustomOverlapped>();
-		context->buffer = std::shared_ptr<char[]>(new char[sizeof(struct sockaddr_in) * 2 + 32]);
+		CustomOverlapped* context = new CustomOverlapped();
+		context->buffer = new char[sizeof(struct sockaddr_in) * 2 + 32];
+		context->buffer_len = sizeof(struct sockaddr_in) * 2 + 32;
 		context->getdata = false; // 标记为 AcceptEx 操作
 		context->sendflag = 0;    // accept标志
 		context->client_socket = acceptSocket;
@@ -311,6 +328,7 @@ public:
 		HANDLE hResult = CreateIoCompletionPort((HANDLE)acceptSocket, completionPort, (ULONG_PTR)acceptSocket, 0);
 		if (hResult == NULL) {
 			std::cerr << "CreateIoCompletionPort failed for acceptSocket: " << GetLastError() << std::endl;
+			delete context;
 			closesocket(acceptSocket);
 			return;
 		}
@@ -323,12 +341,13 @@ public:
 			&guidAcceptEx, sizeof(guidAcceptEx),
 			&lpfnAcceptEx, sizeof(lpfnAcceptEx), &bytes, NULL, NULL);
 
-		BOOL result = lpfnAcceptEx(listenSocket, acceptSocket, context->buffer.get(),
+		BOOL result = lpfnAcceptEx(listenSocket, acceptSocket, context->buffer,
 			0, sizeof(struct sockaddr_in) + 16,
-			sizeof(struct sockaddr_in) + 16, &bytes, &context->overlapped);
+			sizeof(struct sockaddr_in) + 16, &bytes, &(context->overlapped));
 
 		if (!result && WSAGetLastError() != WSA_IO_PENDING) {
 			std::cerr << "AcceptEx failed: " << WSAGetLastError() << std::endl;
+			delete context;
 			closesocket(acceptSocket);
 		}
 		else {
@@ -337,26 +356,28 @@ public:
 	}
 
 	void recv_(SOCKET& client_socket, int len, bool getdatalag) {
-		std::shared_ptr<CustomOverlapped> context = std::make_shared<CustomOverlapped>();
-		context->buffer = std::shared_ptr<char[]>(new char[len]);
+		CustomOverlapped* context = new CustomOverlapped();
+		context->buffer = new char[len];
 
 		context->getdata = getdatalag;
 		context->sendflag = 2;//接收标志
+		context->buffer_len = len;
+		context->client_socket = client_socket;
 
 		DWORD flags = 0; // 标志位
 
 		WSABUF wsabuf;
-		wsabuf.buf = context->buffer.get();
+		wsabuf.buf = context->buffer;
 		wsabuf.len = len;
 
 		//不再使用循环，不可能那么多数据
 		DWORD bytesReceived = 0;
 		int result = WSARecv(client_socket, &wsabuf, 1, &bytesReceived, &flags, &context->overlapped, NULL);
-		std::cerr << "-----" << wsabuf.buf << std::endl;
 		if (result == SOCKET_ERROR) {
 			DWORD error = WSAGetLastError();
 			if (error != WSA_IO_PENDING) {
 				std::cerr << "WSARecv failed with error: " << error << " (WSA Error Code)" << std::endl;
+				delete context;
 				return;
 			}
 		}
@@ -367,7 +388,8 @@ public:
 
 	//如果服务端需要发送消息，需要调用此函数
 	void send_(SOCKET clientSocket, const std::string& data) {
-		std::shared_ptr<CustomOverlapped> context = std::make_shared<CustomOverlapped>();
+		CustomOverlapped* context = new CustomOverlapped();
+
 
 		context->getdata = false;//长度和消息是组合到一起发送的
 
@@ -375,14 +397,16 @@ public:
 		int all_len = 4 + msg_len;
 		uint32_t switch_len = htonl(msg_len);
 
-		context->buffer = std::shared_ptr<char[]>(new char[all_len]);
+		context->buffer = new char[all_len];
 		context->sendflag = 1;//发送标志
+		context->buffer_len = all_len;
+		context->client_socket = clientSocket;
 
-		std::memcpy(context->buffer.get(), &switch_len, sizeof(switch_len));
-		std::memcpy(context->buffer.get() + 4, data.c_str(), msg_len);
+		std::memcpy(context->buffer, &switch_len, sizeof(switch_len));
+		std::memcpy(context->buffer + 4, data.c_str(), msg_len);
 
 		WSABUF wsabuf;
-		wsabuf.buf = context->buffer.get();
+		wsabuf.buf = context->buffer;
 		wsabuf.len = all_len;
 
 		// 发起异步发送
@@ -390,6 +414,7 @@ public:
 		int result = WSASend(clientSocket, &wsabuf, 1, &bytesSent, 0, &context->overlapped, NULL);
 		if (result == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
 			std::cerr << "WSASend failed with error: " << WSAGetLastError() << std::endl;
+			delete context;
 		}
 		else {
 			std::cout << "Async send initiated for socket: " << clientSocket << std::endl;

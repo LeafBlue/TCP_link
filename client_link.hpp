@@ -174,8 +174,7 @@ public:
 			}
 		}
 
-		buffer[message_length] = '\0';
-		std::string result(buffer);
+		std::string result(buffer, message_length);
 
 		delete[] buffer;
 		buffer = nullptr;
