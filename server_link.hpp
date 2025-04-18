@@ -58,16 +58,14 @@ public:
 	server_link() {
 		g_hCompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
 		if (!g_hCompletionPort) {
-			std::cerr << "Failed to create completion port: " << GetLastError() << std::endl;
+			std::cerr << "completion port初始化失败: " << GetLastError() << std::endl;
 			return;
 		}
 	}
-
+	//初始化端口号
 	void setPort(const u_short& PORT_) {
 		PORT = PORT_;
 	}
-
-
 
 	//获取已连接的客户端的套接字
 	const std::vector<SOCKET> getclient_sockets() {
@@ -87,49 +85,30 @@ public:
 
 
 	//---------------------------------------基本函数 结束---------------------------------------
-	void init_(bool isprint = false) {
-		init_WSA(isprint);
-		init_socket(isprint);
+
+	//---------------------------------------初始化 开始---------------------------------------
+	void init_() {
+		init_WSA();
+		init_socket();
 		init_serverinfo();
 		bind_();
 		listen_();
 	}
 
-	int init_WSA(bool isprint = false) {
+	int init_WSA() {
 		if (WSAStartup(MAKEWORD(2, 2), &wsadata) != 0) {
-			if (isprint) {
-				std::cerr << "初始化winsock库失败" << std::endl;
-			}
+			std::cerr << "初始化winsock库失败" << std::endl;
 			return -1;
 		}
-		else {
-			if (isprint) {
-				std::cerr << "初始化winsock库成功" << std::endl;
-			}
-			return 1;
-		}
+		return 1;
 	}
 
-	int init_socket(bool isprint = false) {
+	int init_socket() {
 		serversocket = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
 		if (serversocket == INVALID_SOCKET) {
-			std::cerr << "Failed to create socket with error: " << WSAGetLastError() << std::endl;
-			return -1;
-		}
-		else {
-			std::cout << "Socket created successfully with WSA_FLAG_OVERLAPPED." << std::endl;
-		}
-		if (serversocket == INVALID_SOCKET) {
-			if (isprint) {
-				std::cerr << "socket创建失败" << std::endl;
-			}
+			std::cerr << "套接字创建失败: " << WSAGetLastError() << std::endl;
 			WSACleanup();
 			return -1;
-		}
-		else {
-			if (isprint) {
-				std::cerr << "socket创建成功" << std::endl;
-			}
 		}
 		return serversocket;
 	}
@@ -138,8 +117,6 @@ public:
 		server_addr.sin_port = htons(PORT);
 		server_addr.sin_family = AF_INET;
 		server_addr.sin_addr.s_addr = INADDR_ANY;
-
-
 	}
 
 	int bind_() {
@@ -153,7 +130,7 @@ public:
 
 		HANDLE hResult = CreateIoCompletionPort((HANDLE)serversocket, g_hCompletionPort, (ULONG_PTR)serversocket, 0);
 		if (hResult == NULL) {
-			std::cerr << "CreateIoCompletionPort failed for listen socket: " << GetLastError() << std::endl;
+			std::cerr << "CreateIoCompletionPort监听服务端socket失败: " << GetLastError() << std::endl;
 			closesocket(serversocket);
 			return -1;
 		}
@@ -173,6 +150,8 @@ public:
 		}
 		return listen_result;
 	}
+
+	//---------------------------------------初始化 开始---------------------------------------
 
 	void start_accept() {
 		accept_(serversocket, g_hCompletionPort);
@@ -202,13 +181,12 @@ public:
 				}
 				continue;
 			}
-
+			//不要往overlapped的字段内部存储数据
 			CustomOverlapped* context = CONTAINING_RECORD(overlapped, CustomOverlapped, overlapped);
 
-			//SOCKET client_socket = (SOCKET)completionKey;//这个方法不行
+			//SOCKET client_socket = (SOCKET)completionKey;//这个不牢靠
 			SOCKET client_socket = context->client_socket;
-			std::cout << "context->sendflag:" << context->sendflag << "--client_socket:" << context->client_socket << "--sendflag：" << context->sendflag << std::endl;
-
+			
 			// 检查 client_socket 是否有效
 			if (client_socket == INVALID_SOCKET) {
 				std::cerr << "Invalid client socket in completion" << std::endl;
@@ -247,7 +225,7 @@ public:
 				continue;
 			}
 
-
+			//根据取值情况去不同路径
 			if (context->sendflag == 1) {
 				send_result(overlapped);
 			}
@@ -260,22 +238,20 @@ public:
 		}
 	}
 
-
+	//发送消息的回调调用
 	void send_result(LPOVERLAPPED overlapped) {
 		CustomOverlapped* context = CONTAINING_RECORD(overlapped, CustomOverlapped, overlapped);
 		delete context;
 		std::cout << "Send completed" << std::endl;
 
 	}
-
+	//接收消息的回调调用
 	void recv_result(SOCKET clientSocket, DWORD bytesTransferred, LPOVERLAPPED overlapped) {
 		CustomOverlapped* context = CONTAINING_RECORD(overlapped, CustomOverlapped, overlapped);
 		if (context->getdata) {
 			//将得到的结果转化为数字
 			uint32_t message_length = ntohl(*reinterpret_cast<uint32_t*>(context->buffer));
-
-			std::cout << "接收到的内容：消息长度：" << message_length << std::endl;
-			//清理资源
+			//std::cout << "接收到的内容：消息长度：" << message_length << std::endl;
 			delete context;
 			recv_(clientSocket, message_length, false);
 		}
@@ -285,14 +261,13 @@ public:
 				std::lock_guard<std::mutex> l_(result_m);
 				result_client.push_back(clientSocket);
 				result_print.emplace_back(message);
-
-				std::cout << "接收到的内容：消息内容：" << message << std::endl;
+				//std::cout << "接收到的内容：消息内容：" << message << std::endl;
 			}
 			delete context;
 			recv_(clientSocket, 4, true);
 		}
 	}
-
+	//AcceptEx回调调用函数
 	void accept_result(SOCKET clientSocket, LPOVERLAPPED overlapped) {
 		CustomOverlapped* context = CONTAINING_RECORD(overlapped, CustomOverlapped, overlapped);
 		{
@@ -302,13 +277,12 @@ public:
 		delete context;
 		//启动首次接收
 		recv_(clientSocket, 4, true);
-
 		// 发起新的 AcceptEx
 		accept_(serversocket, g_hCompletionPort);
 
 	}
 
-	//IOCP管理的accept
+	//IOCP管理的accept，循环调用，随时接受连接
 	void accept_(SOCKET listenSocket, HANDLE completionPort) {
 		//用来存储客户端套接字
 		SOCKET acceptSocket = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
@@ -355,6 +329,7 @@ public:
 		}
 	}
 
+	//此函数循环往复调用，随时接收
 	void recv_(SOCKET& client_socket, int len, bool getdatalag) {
 		CustomOverlapped* context = new CustomOverlapped();
 		context->buffer = new char[len];
@@ -389,7 +364,6 @@ public:
 	//如果服务端需要发送消息，需要调用此函数
 	void send_(SOCKET clientSocket, const std::string& data) {
 		CustomOverlapped* context = new CustomOverlapped();
-
 
 		context->getdata = false;//长度和消息是组合到一起发送的
 

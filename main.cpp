@@ -7,7 +7,7 @@ int main() {
 	client.setPort(9092);
 	client.setIP(L"127.0.0.1");
 
-	client.init_clientlink(true);
+	client.init_clientlink();
 
 	std::thread t0([&client]() {
 		while (true) {

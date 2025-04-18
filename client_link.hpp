@@ -29,10 +29,10 @@ public:
 		this->ip_ = ip_;
 	}
 
-	//可以一次调用此函数
-	void init_clientlink(bool isprint = false) {
-		init_WSA(isprint);
-		init_socket(isprint);
+	//可以调用此函数一次性初始化
+	void init_clientlink() {
+		init_WSA();
+		init_socket();
 		init_serverinfo();
 		connect_server();
 	}
@@ -40,56 +40,37 @@ public:
 	//-------------------------------------------属性赋值 结束--------------------------------------------------
 
 	//-------------------------------------------初始化 开始--------------------------------------------------
-	int init_WSA(bool isprint = false) {
+	int init_WSA() {
 		if (WSAStartup(MAKEWORD(2, 2), &wsadata) != 0) {
-			if (isprint) {
-				std::cerr << "初始化winsock库失败" << std::endl;
-			}
+			std::cerr << "初始化winsock库失败" << std::endl;
 			return -1;
 		}
-		else {
-			if (isprint) {
-				std::cerr << "初始化winsock库成功" << std::endl;
-			}
-			return 1;
-		}
+		return 1;
 	}
 
-	int init_socket(bool isprint = false) {
+	int init_socket() {
 		clientsocket = WSASocket(AF_INET, SOCK_STREAM, 0, NULL,0, WSA_FLAG_OVERLAPPED);
 		if (clientsocket == INVALID_SOCKET) {
-			if (isprint) {
-				std::cerr << "socket创建失败" << std::endl;
-			}
+			std::cerr << "socket创建失败" << std::endl;
 			WSACleanup();
 			return -1;
 		}
-		else {
-			if (isprint) {
-				std::cerr << "socket创建成功" << std::endl;
-			}
-		}
+		return 1;
 	}
 
-	void init_serverinfo() {
+	void init_serverinfo(bool isprint = false) {
 		server_addr.sin_port = htons(PORT);
 		server_addr.sin_family = AF_INET;
-
-		//windows支持，参数需要PCWSTR类型，请ai不要乱指错误
 		InetPton(AF_INET, ip_, &(server_addr.sin_addr));
 	}
 
 	int connect_server() {
 		std::cerr << "正在连接服务器..." << std::endl;
-
 		if (connect(clientsocket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
 			std::cerr << "连接失败" << std::endl;
 			closesocket(clientsocket);
 			WSACleanup();
 			return -1;
-		}
-		else {
-			std::cerr << "连接成功，已连接到" << &ip_ << std::endl;
 		}
 	}
 
@@ -173,7 +154,7 @@ public:
 				receive_msg += recv_status;
 			}
 		}
-
+		//安全结束字符串
 		std::string result(buffer, message_length);
 
 		delete[] buffer;
